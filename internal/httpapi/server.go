@@ -46,11 +46,17 @@ func write(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
+const maxBodyBytes = 1 << 20
+
 func decode(r *http.Request, v any) error {
-	if r.ContentLength > 1<<20 {
+	b, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil {
+		return casework.Invalid("请求格式无效: " + err.Error())
+	}
+	if len(b) > maxBodyBytes {
 		return casework.Invalid("请求体过大")
 	}
-	d := json.NewDecoder(r.Body)
+	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if err := d.Decode(v); err != nil {
 		return casework.Invalid("请求格式无效: " + err.Error())
@@ -156,16 +162,16 @@ func (s *Server) caseRoute(w http.ResponseWriter, r *http.Request) {
 	switch parts[1] {
 	case "triage":
 		var v casework.Triage
-		if decode(r, &v) != nil {
-			write(w, 400, map[string]string{"error": "请求格式无效"})
+		if err := decode(r, &v); err != nil {
+			respond(w, nil, err)
 			return
 		}
 		c, e := s.svc.Triage(meta(r), id, v)
 		respond(w, c, e)
 	case "plan":
 		var v casework.InvestigationPlan
-		if decode(r, &v) != nil {
-			write(w, 400, map[string]string{"error": "请求格式无效"})
+		if err := decode(r, &v); err != nil {
+			respond(w, nil, err)
 			return
 		}
 		c, e := s.svc.Plan(meta(r), id, v)
@@ -186,24 +192,24 @@ func (s *Server) caseRoute(w http.ResponseWriter, r *http.Request) {
 		respond(w, c, e)
 	case "hypothesis":
 		var v service.HypothesisCommand
-		if decode(r, &v) != nil {
-			write(w, 400, map[string]string{"error": "请求格式无效"})
+		if err := decode(r, &v); err != nil {
+			respond(w, nil, err)
 			return
 		}
 		c, e := s.svc.HypothesisAction(meta(r), id, v)
 		respond(w, c, e)
 	case "mitigation":
 		var v casework.MitigationVerification
-		if decode(r, &v) != nil {
-			write(w, 400, map[string]string{"error": "请求格式无效"})
+		if err := decode(r, &v); err != nil {
+			respond(w, nil, err)
 			return
 		}
 		c, e := s.svc.Mitigation(meta(r), id, v)
 		respond(w, c, e)
 	case "verification":
 		var v casework.MitigationVerification
-		if decode(r, &v) != nil {
-			write(w, 400, map[string]string{"error": "请求格式无效"})
+		if err := decode(r, &v); err != nil {
+			respond(w, nil, err)
 			return
 		}
 		c, e := s.svc.Verification(meta(r), id, v)
@@ -315,11 +321,8 @@ type evidenceWithdrawalCommand struct {
 }
 
 func decodeEvidenceRequest(r *http.Request) ([]casework.EvidenceRecord, *evidenceWithdrawalCommand, error) {
-	if r.ContentLength > 1<<20 {
-		return nil, nil, casework.Invalid("请求体过大")
-	}
-	b, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
-	if err != nil || len(b) > 1<<20 {
+	b, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil || len(b) > maxBodyBytes {
 		return nil, nil, casework.Invalid("请求体过大")
 	}
 	trimmed := bytes.TrimSpace(b)
