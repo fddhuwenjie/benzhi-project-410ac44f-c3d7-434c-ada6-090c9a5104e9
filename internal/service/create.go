@@ -54,8 +54,13 @@ func (s *Service) Create(m Meta, in CreateInput) (*casework.InterferenceCase, er
 		}
 		return candidates[i].Score > candidates[j].Score
 	})
-	if raw, ok := s.repo.Idempotent(m.RequestID); ok {
-		return decodeResult(raw)
+	normalizedCreate := normalizeCreateInput(in)
+	fp := fingerprint(m.Actor, "CASE_CREATED", normalizedCreate)
+	if raw, storedFP, ok := s.repo.Idempotent(m.RequestID); ok {
+		if storedFP == fp {
+			return decodeResult(raw)
+		}
+		return nil, casework.Conflict("request_id 已用于其他操作或载荷")
 	}
 	disposition := strings.ToUpper(strings.TrimSpace(in.AssociationDisposition))
 	if disposition == "" {
@@ -84,7 +89,7 @@ func (s *Service) Create(m Meta, in CreateInput) (*casework.InterferenceCase, er
 	c.Association = casework.AssociationDecision{Disposition: disposition, RelatedCaseID: in.RelatedCaseID, Candidates: candidates}
 	summary := map[string]any{"fingerprint": c.Fingerprint, "candidate_matches": candidates, "association_disposition": disposition, "related_case_id": in.RelatedCaseID}
 	e := makeEvent(m, c, "", "CASE_CREATED", summary)
-	if err = s.repo.Commit(c, e, m.RequestID, c); err != nil {
+	if err = s.repo.Commit(c, e, m.RequestID, fp, c); err != nil {
 		return nil, err
 	}
 	return c, nil

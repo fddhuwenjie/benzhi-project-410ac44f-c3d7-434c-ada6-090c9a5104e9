@@ -6,10 +6,10 @@ type Repository interface {
 	GetCase(string) (*casework.InterferenceCase, bool)
 	Cases() []*casework.InterferenceCase
 	PutCase(*casework.InterferenceCase) error
-	Idempotent(string) ([]byte, bool)
-	SaveResult(string, any) error
+	Idempotent(req string) (result []byte, fingerprint string, ok bool)
+	SaveResult(req, fingerprint string, v any) error
 	AppendAudit(casework.AuditEvent) error
-	Commit(*casework.InterferenceCase, casework.AuditEvent, string, any) error
+	Commit(c *casework.InterferenceCase, e casework.AuditEvent, req, fingerprint string, result any) error
 	Audit(string) []casework.AuditEvent
 	AuditIntegrity(string) bool
 }

@@ -10,8 +10,9 @@ import (
 )
 
 type snapshot struct {
-	Cases   map[string]*casework.InterferenceCase `json:"cases"`
-	Results map[string]json.RawMessage            `json:"results"`
+	Cases        map[string]*casework.InterferenceCase `json:"cases"`
+	Results      map[string]json.RawMessage            `json:"results"`
+	Fingerprints map[string]string                     `json:"fingerprints,omitempty"`
 }
 type Store struct {
 	mu           sync.RWMutex
@@ -25,7 +26,7 @@ func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, data: snapshot{Cases: map[string]*casework.InterferenceCase{}, Results: map[string]json.RawMessage{}}}
+	s := &Store{dir: dir, data: snapshot{Cases: map[string]*casework.InterferenceCase{}, Results: map[string]json.RawMessage{}, Fingerprints: map[string]string{}}}
 	b, err := os.ReadFile(filepath.Join(dir, "snapshot.json"))
 	if err == nil {
 		if json.Unmarshal(b, &s.data) != nil {
@@ -37,6 +38,9 @@ func Open(dir string) (*Store, error) {
 	}
 	if s.data.Results == nil {
 		s.data.Results = map[string]json.RawMessage{}
+	}
+	if s.data.Fingerprints == nil {
+		s.data.Fingerprints = map[string]string{}
 	}
 	ab, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
 	if err == nil {
@@ -108,17 +112,23 @@ func (s *Store) Cases() []*casework.InterferenceCase {
 	}
 	return out
 }
-func (s *Store) Idempotent(req string) ([]byte, bool) {
+func (s *Store) Idempotent(req string) ([]byte, string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r, ok := s.data.Results[req]
-	return []byte(r), ok
+	if !ok {
+		return nil, "", false
+	}
+	return []byte(r), s.data.Fingerprints[req], true
 }
-func (s *Store) SaveResult(req string, v any) error {
+func (s *Store) SaveResult(req, fingerprint string, v any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, _ := json.Marshal(v)
 	s.data.Results[req] = b
+	if fingerprint != "" {
+		s.data.Fingerprints[req] = fingerprint
+	}
 	return s.persist()
 }
 func (s *Store) AppendAudit(e casework.AuditEvent) error {
@@ -136,7 +146,7 @@ func (s *Store) AppendAudit(e casework.AuditEvent) error {
 	s.audit = append(s.audit, e)
 	return nil
 }
-func (s *Store) Commit(c *casework.InterferenceCase, e casework.AuditEvent, req string, result any) error {
+func (s *Store) Commit(c *casework.InterferenceCase, e casework.AuditEvent, req, fingerprint string, result any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	resultBytes, err := json.Marshal(result)
@@ -145,8 +155,12 @@ func (s *Store) Commit(c *casework.InterferenceCase, e casework.AuditEvent, req 
 	}
 	oldCase, hadCase := s.data.Cases[c.ID]
 	oldResult, hadResult := s.data.Results[req]
+	oldFingerprint, hadFingerprint := s.data.Fingerprints[req]
 	s.data.Cases[c.ID] = cloneCase(c)
 	s.data.Results[req] = resultBytes
+	if fingerprint != "" {
+		s.data.Fingerprints[req] = fingerprint
+	}
 	if err = s.persist(); err != nil {
 		if hadCase {
 			s.data.Cases[c.ID] = oldCase
@@ -157,6 +171,11 @@ func (s *Store) Commit(c *casework.InterferenceCase, e casework.AuditEvent, req 
 			s.data.Results[req] = oldResult
 		} else {
 			delete(s.data.Results, req)
+		}
+		if hadFingerprint {
+			s.data.Fingerprints[req] = oldFingerprint
+		} else {
+			delete(s.data.Fingerprints, req)
 		}
 		return err
 	}

@@ -8,18 +8,13 @@ import (
 )
 
 func (s *Service) Triage(m Meta, id string, t casework.Triage) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleDuty); err != nil {
-		return nil, err
-	}
-	return s.mutate(m, id, "CASE_TRIAGED", func(c *casework.InterferenceCase) error { return c.Triage(t, m.Actor) }, func(c *casework.InterferenceCase) any {
+	payload := normalizeTriageInput(t)
+	return s.mutate(m, id, "CASE_TRIAGED", payload, casework.RoleDuty, func(c *casework.InterferenceCase) error { return c.Triage(t, m.Actor) }, func(c *casework.InterferenceCase) any {
 		return map[string]any{"input": c.Impact, "score_breakdown": c.Impact.ScoreBreakdown, "actor": m.Actor}
 	})
 }
 
 func (s *Service) Plan(m Meta, id string, p casework.InvestigationPlan) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleEngineer); err != nil {
-		return nil, err
-	}
 	p = NormalizePlan(p)
 	reason := p.ReplacementReason
 	p.ID = prefixedID("plan")
@@ -28,7 +23,8 @@ func (s *Service) Plan(m Meta, id string, p casework.InvestigationPlan) (*casewo
 		eventType = "PLAN_REPLACED"
 	}
 	var oldPlan *casework.InvestigationPlan
-	return s.mutate(m, id, eventType, func(c *casework.InterferenceCase) error {
+	payload := normalizePlanInput(p)
+	return s.mutate(m, id, eventType, payload, casework.RoleEngineer, func(c *casework.InterferenceCase) error {
 		if c.State == casework.StateTriaged && reason != "" {
 			return casework.Invalid("首版调查计划不得填写 replacement_reason")
 		}
@@ -109,18 +105,16 @@ func (s *Service) Evidence(m Meta, id string, e casework.EvidenceRecord) (*casew
 	return s.EvidenceBatch(m, id, []casework.EvidenceRecord{e})
 }
 func (s *Service) EvidenceBatch(m Meta, id string, batch []casework.EvidenceRecord) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleEngineer); err != nil {
-		return nil, err
-	}
 	if len(batch) > 50 {
 		return nil, casework.Invalid("证据批次最多 50 条")
 	}
+	payload := normalizeEvidenceBatchInput(batch)
 	for i := range batch {
 		if strings.TrimSpace(batch[i].ID) == "" {
 			batch[i].ID = prefixedID("ev")
 		}
 	}
-	return s.mutate(m, id, "EVIDENCE_BATCH_ACCEPTED", func(c *casework.InterferenceCase) error { return c.AddEvidenceBatch(batch) }, func(c *casework.InterferenceCase) any {
+	return s.mutate(m, id, "EVIDENCE_BATCH_ACCEPTED", payload, casework.RoleEngineer, func(c *casework.InterferenceCase) error { return c.AddEvidenceBatch(batch) }, func(c *casework.InterferenceCase) any {
 		return map[string]any{"batch_size": len(batch), "evidence_ids": evidenceIDs(batch), "coverage": c.EvidenceCoverage}
 	})
 }
@@ -133,11 +127,9 @@ func evidenceIDs(v []casework.EvidenceRecord) []string {
 }
 
 func (s *Service) WithdrawEvidence(m Meta, id string, evidenceIDs []string, reason string) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleEngineer); err != nil {
-		return nil, err
-	}
 	reason = strings.TrimSpace(reason)
-	return s.mutate(m, id, "EVIDENCE_WITHDRAWN", func(c *casework.InterferenceCase) error {
+	payload := normalizeWithdrawalInput(evidenceIDs, reason)
+	return s.mutate(m, id, "EVIDENCE_WITHDRAWN", payload, casework.RoleEngineer, func(c *casework.InterferenceCase) error {
 		return c.WithdrawEvidence(evidenceIDs, m.Actor, reason)
 	}, func(c *casework.InterferenceCase) any {
 		return map[string]any{"evidence_ids": evidenceIDs, "correction_reason": reason, "coverage": c.EvidenceCoverage, "active_evidence_count": len(c.Evidence)}
@@ -162,15 +154,13 @@ type HypothesisTestInput struct {
 }
 
 func (s *Service) HypothesisAction(m Meta, id string, in HypothesisCommand) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleInvestigator); err != nil {
-		return nil, err
-	}
 	action := strings.ToUpper(strings.TrimSpace(in.Action))
 	eventType := "HYPOTHESIS_UPDATED"
 	if action == "CONFIRM" {
 		eventType = "HYPOTHESIS_CONFIRMED"
 	}
-	return s.mutate(m, id, eventType, func(c *casework.InterferenceCase) error {
+	payload := normalizeHypothesisInput(in, action)
+	return s.mutate(m, id, eventType, payload, casework.RoleInvestigator, func(c *casework.InterferenceCase) error {
 		switch action {
 		case "REGISTER", "ADD_CANDIDATE":
 			return c.RegisterCandidate(prefixedID("hyp"), in.CandidateSource)
@@ -216,29 +206,22 @@ func firstNonBlank(v ...string) string {
 	return ""
 }
 func (s *Service) Hypothesis(m Meta, id string, h casework.SourceHypothesis) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleInvestigator); err != nil {
-		return nil, err
-	}
-	return s.mutate(m, id, "HYPOTHESIS_CONFIRMED", func(c *casework.InterferenceCase) error { return c.ConfirmHypothesis(h) }, nil)
+	return s.mutate(m, id, "HYPOTHESIS_CONFIRMED", normalizeHypothesisConfirmInput(h), casework.RoleInvestigator, func(c *casework.InterferenceCase) error { return c.ConfirmHypothesis(h) }, nil)
 }
 
 func (s *Service) Mitigation(m Meta, id string, v casework.MitigationVerification) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleEngineer); err != nil {
-		return nil, err
-	}
 	attempt := casework.MitigationAttempt{ID: prefixedID("attempt"), PreviousAttemptID: v.PreviousAttemptID, MeasureType: v.MeasureType, MeasureDescription: strings.TrimSpace(v.MeasureDescription), ImplementedAt: v.ImplementedAt, ImplementedBy: m.Actor}
-	return s.mutate(m, id, "MITIGATION_ATTEMPTED", func(c *casework.InterferenceCase) error { return c.AddAttempt(attempt) }, func(c *casework.InterferenceCase) any {
+	payload := normalizeMitigationInput(v)
+	return s.mutate(m, id, "MITIGATION_ATTEMPTED", payload, casework.RoleEngineer, func(c *casework.InterferenceCase) error { return c.AddAttempt(attempt) }, func(c *casework.InterferenceCase) any {
 		return map[string]any{"attempt": c.MitigationAttempts[len(c.MitigationAttempts)-1], "previous_attempt_id": attempt.PreviousAttemptID}
 	})
 }
 func (s *Service) Verification(m Meta, id string, v casework.MitigationVerification) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleReviewer); err != nil {
-		return nil, err
-	}
 	if strings.TrimSpace(v.AttemptID) == "" {
 		return nil, casework.Invalid("verification 必须指定 attempt_id")
 	}
-	return s.mutate(m, id, "VERIFICATION_RECORDED", func(c *casework.InterferenceCase) error { return c.VerifyAttempt(v.AttemptID, m.Actor, v) }, func(c *casework.InterferenceCase) any {
+	payload := normalizeVerificationInput(v)
+	return s.mutate(m, id, "VERIFICATION_RECORDED", payload, casework.RoleReviewer, func(c *casework.InterferenceCase) error { return c.VerifyAttempt(v.AttemptID, m.Actor, v) }, func(c *casework.InterferenceCase) any {
 		attempt := c.MitigationAttempts[len(c.MitigationAttempts)-1]
 		verification := attempt.Verifications[len(attempt.Verifications)-1]
 		return map[string]any{"attempt_id": v.AttemptID, "previous_attempt_id": attempt.PreviousAttemptID, "conclusion": verification.Result, "metric_differences": verification.Differences, "attempts": c.MitigationAttempts}
@@ -246,8 +229,103 @@ func (s *Service) Verification(m Meta, id string, v casework.MitigationVerificat
 }
 
 func (s *Service) Close(m Meta, id string) (*casework.InterferenceCase, error) {
-	if err := requireRole(m.Actor, casework.RoleReviewer); err != nil {
-		return nil, err
+	return s.mutate(m, id, "CASE_CLOSED", map[string]any{"close": true}, casework.RoleReviewer, func(c *casework.InterferenceCase) error { return c.Close(m.Actor, s.repo.AuditIntegrity(id)) }, func(c *casework.InterferenceCase) any { return c.Closure })
+}
+
+func normalizeTriageInput(t casework.Triage) casework.Triage {
+	t.Rationale = strings.TrimSpace(t.Rationale)
+	t.BandwidthRatio = 0
+	t.ScoreBreakdown = casework.TriageScore{}
+	t.Severity = ""
+	t.TriagedBy = ""
+	return t
+}
+
+func normalizePlanInput(p casework.InvestigationPlan) casework.InvestigationPlan {
+	cp := p
+	cp.ID = ""
+	cp.CaseID = ""
+	cp.Revision = 0
+	cp.Items = nil
+	cp.Coverage = casework.PlanCoverageSummary{}
+	cp.ResourceValidation = casework.ResourceValidation{}
+	return cp
+}
+
+func normalizeEvidenceBatchInput(batch []casework.EvidenceRecord) []casework.EvidenceRecord {
+	out := make([]casework.EvidenceRecord, len(batch))
+	for i := range batch {
+		e := batch[i]
+		e.ID = strings.TrimSpace(e.ID)
+		e.CaseID = ""
+		e.ContentHash = strings.ToLower(strings.TrimSpace(e.ContentHash))
+		out[i] = e
 	}
-	return s.mutate(m, id, "CASE_CLOSED", func(c *casework.InterferenceCase) error { return c.Close(m.Actor, s.repo.AuditIntegrity(id)) }, func(c *casework.InterferenceCase) any { return c.Closure })
+	return out
+}
+
+func normalizeWithdrawalInput(ids []string, reason string) map[string]any {
+	normalized := make([]string, len(ids))
+	for i, id := range ids {
+		normalized[i] = strings.TrimSpace(id)
+	}
+	return map[string]any{"evidence_ids": normalized, "correction_reason": reason}
+}
+
+func normalizeHypothesisInput(in HypothesisCommand, action string) map[string]any {
+	out := map[string]any{"action": action}
+	if in.CandidateID != "" {
+		out["candidate_id"] = strings.TrimSpace(in.CandidateID)
+	}
+	if in.CandidateSource != "" {
+		out["candidate_source"] = strings.TrimSpace(in.CandidateSource)
+	}
+	if in.Test != nil {
+		out["test"] = in.Test
+	}
+	if in.TestWindow.Start != in.TestWindow.End {
+		out["test_window"] = in.TestWindow
+	}
+	if len(in.BaselineMetrics) > 0 {
+		out["baseline_metrics"] = in.BaselineMetrics
+	}
+	if len(in.ActiveMetrics) > 0 {
+		out["active_metrics"] = in.ActiveMetrics
+	}
+	if in.ExclusionNotes != "" {
+		out["exclusion_notes"] = strings.TrimSpace(in.ExclusionNotes)
+	}
+	if in.Reason != "" {
+		out["reason"] = strings.TrimSpace(in.Reason)
+	}
+	return out
+}
+
+func normalizeHypothesisConfirmInput(h casework.SourceHypothesis) casework.SourceHypothesis {
+	cp := h
+	cp.ID = ""
+	cp.CaseID = ""
+	cp.ConfirmedAt = nil
+	return cp
+}
+
+func normalizeMitigationInput(v casework.MitigationVerification) casework.MitigationVerification {
+	cp := v
+	cp.ID = ""
+	cp.AttemptID = strings.TrimSpace(v.AttemptID)
+	cp.CaseID = ""
+	cp.MeasureDescription = strings.TrimSpace(v.MeasureDescription)
+	cp.Reviewer = ""
+	cp.Result = ""
+	return cp
+}
+
+func normalizeVerificationInput(v casework.MitigationVerification) casework.MitigationVerification {
+	cp := v
+	cp.ID = ""
+	cp.CaseID = ""
+	cp.MeasureDescription = strings.TrimSpace(v.MeasureDescription)
+	cp.Reviewer = ""
+	cp.Result = ""
+	return cp
 }

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -53,14 +55,48 @@ func makeEvent(m Meta, c *casework.InterferenceCase, from casework.State, eventT
 	e.PayloadDigest = storage.AuditDigest(e)
 	return e
 }
-func (s *Service) mutate(m Meta, id, eventType string, fn func(*casework.InterferenceCase) error, summary func(*casework.InterferenceCase) any) (*casework.InterferenceCase, error) {
+
+// canonicalPayload marshals v into deterministic JSON bytes so that request
+// replay comparisons are stable regardless of map iteration order.
+func canonicalPayload(v any) []byte {
+	if v == nil {
+		return []byte("null")
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return canonicalJSON(b)
+}
+
+// fingerprint returns a stable digest that identifies the actor, the operation
+// (and its target resource), and the normalized request payload. Two requests
+// sharing a request id are only idempotent when their fingerprints match.
+func fingerprint(actor, resource string, payload any) string {
+	h := sha256.New()
+	h.Write([]byte(strings.TrimSpace(actor)))
+	h.Write([]byte{0})
+	h.Write([]byte(resource))
+	h.Write([]byte{0})
+	h.Write(canonicalPayload(payload))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *Service) mutate(m Meta, id, eventType string, payload any, role casework.Role, fn func(*casework.InterferenceCase) error, summary func(*casework.InterferenceCase) any) (*casework.InterferenceCase, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.check(m); err != nil {
 		return nil, err
 	}
-	if raw, ok := s.repo.Idempotent(m.RequestID); ok {
-		return decodeResult(raw)
+	fp := fingerprint(m.Actor, eventType+":"+id, payload)
+	if raw, storedFP, ok := s.repo.Idempotent(m.RequestID); ok {
+		if storedFP == fp {
+			return decodeResult(raw)
+		}
+		return nil, casework.Conflict("request_id 已用于其他操作或载荷")
+	}
+	if err := requireRole(m.Actor, role); err != nil {
+		return nil, err
 	}
 	c, ok := s.repo.GetCase(id)
 	if !ok {
@@ -79,12 +115,12 @@ func (s *Service) mutate(m Meta, id, eventType string, fn func(*casework.Interfe
 	if err := fn(c); err != nil {
 		return nil, err
 	}
-	payload := any(map[string]any{"revision": c.Revision})
+	summaryPayload := any(map[string]any{"revision": c.Revision})
 	if summary != nil {
-		payload = summary(c)
+		summaryPayload = summary(c)
 	}
-	e := makeEvent(m, c, from, eventType, payload)
-	if err := s.repo.Commit(c, e, m.RequestID, c); err != nil {
+	e := makeEvent(m, c, from, eventType, summaryPayload)
+	if err := s.repo.Commit(c, e, m.RequestID, fp, c); err != nil {
 		return nil, err
 	}
 	return c, nil
