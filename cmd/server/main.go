@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/benzhi/relay-survey/internal/httpapi"
 	"github.com/benzhi/relay-survey/internal/service"
 	"github.com/benzhi/relay-survey/internal/storage"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -40,18 +42,37 @@ func main() {
 	}
 	r, err := storage.Open(*data)
 	if err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, "打开数据目录失败:", err)
+		os.Exit(1)
 	}
 	srv := httpapi.New(service.New(r))
-	go srv.ListenAndServe(a)
-	waitSignal(srv)
+	ln, err := net.Listen("tcp", a)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "监听失败:", err)
+		os.Exit(1)
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	if err := waitSignal(srv, serveErr); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
-func waitSignal(s *httpapi.Server) {
+func waitSignal(s *httpapi.Server, serveErr <-chan error) error {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(ch)
-	<-ch
-	s.Shutdown()
+	select {
+	case <-ch:
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return s.ShutdownWithContext(ctx)
+	case err := <-serveErr:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("服务异常退出: %w", err)
+	}
 }
 func runSelf(addr string) error {
 	dir, err := os.MkdirTemp("", "relay-selfcheck-")
@@ -61,7 +82,11 @@ func runSelf(addr string) error {
 	defer os.RemoveAll(dir)
 	r, _ := storage.Open(filepath.Clean(dir))
 	srv := httpapi.New(service.New(r))
-	go srv.ListenAndServe(addr)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("监听失败: %w", err)
+	}
+	go srv.Serve(ln)
 	time.Sleep(80 * time.Millisecond)
 	client := &http.Client{Timeout: 2 * time.Second}
 	post := func(path, req, actor string, rev int) (map[string]any, error) {

@@ -8,6 +8,7 @@ import (
 	"github.com/benzhi/relay-survey/internal/casework"
 	"github.com/benzhi/relay-survey/internal/service"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	s.http.Addr = addr
 	return s.http.ListenAndServe()
 }
+func (s *Server) Serve(ln net.Listener) error                   { return s.http.Serve(ln) }
 func (s *Server) Shutdown() error                               { return s.http.Close() }
 func (s *Server) ShutdownWithContext(ctx context.Context) error { return s.http.Shutdown(ctx) }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
