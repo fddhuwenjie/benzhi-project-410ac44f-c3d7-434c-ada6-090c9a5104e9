@@ -162,21 +162,26 @@ func (s *Store) Commit(c *casework.InterferenceCase, e casework.AuditEvent, req 
 	}
 	b, err := json.Marshal(e)
 	if err != nil {
+		s.rollbackSnapshot(c.ID, req, oldCase, hadCase, oldResult, hadResult)
 		return err
 	}
 	f, err := os.OpenFile(filepath.Join(s.dir, "audit.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
+		s.rollbackSnapshot(c.ID, req, oldCase, hadCase, oldResult, hadResult)
 		return err
 	}
 	if _, err = f.Write(append(b, '\n')); err != nil {
 		_ = f.Close()
+		s.rollbackSnapshot(c.ID, req, oldCase, hadCase, oldResult, hadResult)
 		return err
 	}
 	if err = f.Sync(); err != nil {
 		_ = f.Close()
+		s.rollbackSnapshot(c.ID, req, oldCase, hadCase, oldResult, hadResult)
 		return err
 	}
 	if err = f.Close(); err != nil {
+		s.rollbackSnapshot(c.ID, req, oldCase, hadCase, oldResult, hadResult)
 		return err
 	}
 	s.audit = append(s.audit, e)
@@ -185,6 +190,19 @@ func (s *Store) Commit(c *casework.InterferenceCase, e casework.AuditEvent, req 
 		return err
 	}
 	return nil
+}
+func (s *Store) rollbackSnapshot(caseID, req string, oldCase *casework.InterferenceCase, hadCase bool, oldResult json.RawMessage, hadResult bool) {
+	if hadCase {
+		s.data.Cases[caseID] = oldCase
+	} else {
+		delete(s.data.Cases, caseID)
+	}
+	if hadResult {
+		s.data.Results[req] = oldResult
+	} else {
+		delete(s.data.Results, req)
+	}
+	_ = s.persist()
 }
 func (s *Store) Audit(id string) []casework.AuditEvent {
 	s.mu.RLock()
