@@ -14,13 +14,10 @@ type snapshot struct {
 	Results map[string]json.RawMessage            `json:"results"`
 }
 type Store struct {
-	mu               sync.RWMutex
-	dir              string
-	data             snapshot
-	audit            []casework.AuditEvent
-	auditCorrupt     bool
-	integrityChecked map[string]bool
-	integrityCache   map[string]bool
+	mu    sync.RWMutex
+	dir   string
+	data  snapshot
+	audit []casework.AuditEvent
 }
 
 func Open(dir string) (*Store, error) {
@@ -28,10 +25,8 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		dir:              dir,
-		data:             snapshot{Cases: map[string]*casework.InterferenceCase{}, Results: map[string]json.RawMessage{}},
-		integrityChecked: map[string]bool{},
-		integrityCache:   map[string]bool{},
+		dir:  dir,
+		data: snapshot{Cases: map[string]*casework.InterferenceCase{}, Results: map[string]json.RawMessage{}},
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "snapshot.json"))
 	if err == nil {
@@ -51,8 +46,6 @@ func Open(dir string) (*Store, error) {
 			var e casework.AuditEvent
 			if json.Unmarshal(line, &e) == nil {
 				s.audit = append(s.audit, e)
-			} else {
-				s.auditCorrupt = true
 			}
 		}
 	}
@@ -201,40 +194,34 @@ func (s *Store) Audit(id string) []casework.AuditEvent {
 	return out
 }
 func (s *Store) AuditIntegrity(id string) bool {
-	s.mu.RLock()
-	if s.integrityChecked[id] {
-		valid := s.integrityCache[id]
-		s.mu.RUnlock()
-		return valid
-	}
-	corrupt := s.auditCorrupt
 	dir := s.dir
-	s.mu.RUnlock()
-	valid := false
-	if corrupt {
-		valid = false
-	} else if b, err := os.ReadFile(filepath.Join(dir, "audit.jsonl")); err != nil {
-		valid = len(s.Audit(id)) == 0
-	} else {
+	if b, err := os.ReadFile(filepath.Join(dir, "audit.jsonl")); err == nil {
 		events := []casework.AuditEvent{}
-		valid = true
 		for _, line := range splitLines(b) {
 			var e casework.AuditEvent
 			if json.Unmarshal(line, &e) != nil {
-				valid = false
-				break
+				return false
 			}
 			if e.CaseID == id {
 				events = append(events, e)
 			}
 		}
-		if valid {
-			valid = ValidateAudit(events)
+		if !ValidateAudit(events) {
+			return false
+		}
+		return matchesInMemoryAudit(events, s.Audit(id))
+	}
+	return len(s.Audit(id)) == 0
+}
+
+func matchesInMemoryAudit(disk, mem []casework.AuditEvent) bool {
+	if len(disk) != len(mem) {
+		return false
+	}
+	for i := range disk {
+		if disk[i].Revision != mem[i].Revision || disk[i].EventID != mem[i].EventID || disk[i].PayloadDigest != mem[i].PayloadDigest {
+			return false
 		}
 	}
-	s.mu.Lock()
-	s.integrityChecked[id] = true
-	s.integrityCache[id] = valid
-	s.mu.Unlock()
-	return valid
+	return true
 }
